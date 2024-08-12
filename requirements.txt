@@ -1,5 +1,9 @@
+aiohappyeyeballs==2.3.5
+aiohttp==3.10.3
+aiosignal==1.3.1
 annotated-types==0.7.0
 argcomplete==3.5.0
+attrs==24.2.0
 black==24.8.0
 certifi==2024.7.4
 cffi==1.17.0
@@ -9,6 +13,7 @@ curl_cffi==0.7.1
 datamodel-code-generator==0.25.9
 dnspython==2.6.1
 email_validator==2.2.0
+frozenlist==1.4.1
 genson==1.3.0
 idna==3.7
 inflect==5.6.2
@@ -16,6 +21,7 @@ isort==5.13.2
 Jinja2==3.1.4
 m3u8==6.0.0
 MarkupSafe==2.1.5
+multidict==6.0.5
 mypy-extensions==1.0.0
 nodeenv==1.9.1
 packaging==24.1
@@ -28,9 +34,9 @@ pyright==1.1.375
 python-dateutil==2.9.0.post0
 python-slugify==8.0.4
 PyYAML==6.0.2
-requests==2.32.3
 six==1.16.0
 text-unidecode==1.3
 typed-argparse==0.3.1
 typing_extensions==4.12.2
 urllib3==2.2.2
+yarl==1.9.4

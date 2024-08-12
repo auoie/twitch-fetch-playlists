@@ -1,10 +1,11 @@
+import asyncio
 from hashlib import sha1
 from pathlib import Path
 from time import sleep
-from typing import List, Literal
+from typing import List, Literal, NoReturn
+import aiohttp
 from curl_cffi import requests as cf_requests
 import dateutil
-import requests
 import dateutil.parser
 import m3u8
 from pydantic import BaseModel
@@ -40,6 +41,9 @@ class Arguments(TypedArgs):
     resolution: T_RESOLUTION = typed_argparse.arg(
         "-r", help="resolution (chunked is highest resolution)", default="chunked"
     )
+    concurrency: int = typed_argparse.arg(
+        "-c", default=20, help="concurrency level for fetching playlists"
+    )
 
 
 class M3U8Stream(BaseModel):
@@ -49,18 +53,21 @@ class M3U8Stream(BaseModel):
     path: str
 
 
-def get_valid_playlist(path: str, resolution: T_RESOLUTION) -> M3U8Stream | None:
+async def get_valid_playlist(
+    session: aiohttp.ClientSession, path: str, resolution: T_RESOLUTION
+) -> M3U8Stream | None:
     for domain in DOMAINS:
         link = f"{domain}{path}/{resolution}/index-dvr.m3u8"
         partial_link = f"{domain}{path}/{resolution}/"
         try:
-            resp = requests.get(link, timeout=5)
+            resp = await session.get(url=link, timeout=aiohttp.ClientTimeout(5))
         except Exception as e:
             print(e)
             continue
         if resp.ok:
+            text = await resp.text()
             return M3U8Stream(
-                content=resp.text, link=link, partial_link=partial_link, path=path
+                content=text, link=link, partial_link=partial_link, path=path
             )
     return None
 
@@ -95,6 +102,86 @@ def replace_unmuted(path: str) -> str:
     return path.replace("unmuted", "muted")
 
 
+class UrlPathInput(BaseModel):
+    channelurl: str
+    streamid: int
+    unix_timestamp: int
+
+
+def generate_path(input: UrlPathInput) -> str:
+    input_str = f"{input.channelurl}_{input.streamid}_{input.unix_timestamp}"
+    hash = sha1(input_str.encode("utf-8")).hexdigest()
+    return f"{hash[:20]}_{input_str}"
+
+
+def get_possible_paths(streams_api_response: api.Model) -> List[tuple[str, api.Datum]]:
+    paths: List[tuple[str, api.Datum]] = []
+    for stream_data in streams_api_response.data:
+        # note: could be off by 1 second
+        unix_timestamp = int(
+            dateutil.parser.isoparse(stream_data.startDateTime).timestamp()
+        )
+        for i in range(2):
+            input = UrlPathInput(
+                channelurl=stream_data.channelurl,
+                streamid=stream_data.streamId,
+                unix_timestamp=unix_timestamp - i,
+            )
+            path = generate_path(input)
+            paths.append((path, stream_data))
+    return paths
+
+
+async def worker(
+    session: aiohttp.ClientSession,
+    resolution: T_RESOLUTION,
+    queue: asyncio.Queue[tuple[str, api.Datum]],
+):
+    while True:
+        path = await queue.get()
+        stream_data = path[1]
+        response = await get_valid_playlist(session, path[0], resolution)
+        if response is not None:
+            print("found:", response.link)
+            content = m3u8.loads(response.content)
+            for untypedSegment in content.segments:
+                segment: m3u8.Segment = untypedSegment
+                # note: possible for some segments to be gone
+                if not isinstance(segment.uri, str):
+                    print(f"err: {segment} in {response.link} has a non-string uri")
+                    exit(1)
+                segment.uri = f"{response.partial_link}{replace_unmuted(segment.uri)}"
+            new_file: str = content.dumps()
+            streamer_folder = Path(
+                "playlists", stream_data.channelurl, resolution
+            ).resolve()
+            streamer_folder.mkdir(parents=True, exist_ok=True)
+            filePath = Path(
+                streamer_folder,
+                f"{stream_data.channelurl}_{slugify(stream_data.startDateTime)}_{stream_data.streamId}.m3u8",
+            ).resolve()
+            filePath.write_text(new_file)
+        else:
+            print("not found:", path)
+        queue.task_done()
+
+
+async def get_valid_paths(
+    concurrency: int, resolution: T_RESOLUTION, paths: List[tuple[str, api.Datum]]
+):
+    async with aiohttp.ClientSession() as session:
+        queue = asyncio.Queue[tuple[str, api.Datum]]()
+        for path in paths:
+            await queue.put(path)
+        tasks: List[asyncio.Task[NoReturn]] = []
+        for i in range(concurrency):
+            task = asyncio.create_task(worker(session, resolution, queue))
+        await queue.join()
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
 def run_program(args: Arguments) -> None:
     streamer_name = args.streamer_name
     link = make_sullygnome_link(streamer_name)
@@ -120,42 +207,9 @@ def run_program(args: Arguments) -> None:
     except ValidationError as err:
         print(err)
         exit(1)
-    paths: List[tuple[str, api.Datum]] = []
-    for stream_data in streams_api_response.data:
-        # note: could be off by 1 second
-        unix_timestamp = int(
-            dateutil.parser.isoparse(stream_data.startDateTime).timestamp()
-        )
-        input_str = f"{stream_data.channelurl}_{stream_data.streamId}_{unix_timestamp}"
-        hash = sha1(input_str.encode("utf-8")).hexdigest()
-        path = f"{hash[:20]}_{input_str}"
-        paths.append((path, stream_data))
+    paths = get_possible_paths(streams_api_response)
     print(f"{len(paths)} streams to consider")
-    for path in paths:
-        stream_data = path[1]
-        response = get_valid_playlist(path[0], args.resolution)
-        if response is not None:
-            print("found:", response.link)
-            content = m3u8.loads(response.content)
-            for untypedSegment in content.segments:
-                segment: m3u8.Segment = untypedSegment
-                # note: possible for some segments to be gone
-                if not isinstance(segment.uri, str):
-                    print(f"err: {segment} in {response.link} has a non-string uri")
-                    exit(1)
-                segment.uri = f"{response.partial_link}{replace_unmuted(segment.uri)}"
-            new_file: str = content.dumps()
-            streamer_folder = Path(
-                "playlists", streamer_name, args.resolution
-            ).resolve()
-            streamer_folder.mkdir(parents=True, exist_ok=True)
-            filePath = Path(
-                streamer_folder,
-                f"{stream_data.channelurl}_{slugify(stream_data.startDateTime)}_{stream_data.streamId}.m3u8",
-            ).resolve()
-            filePath.write_text(new_file)
-        else:
-            print("not found:", path)
+    asyncio.run(get_valid_paths(20, args.resolution, paths))
 
 
 def main():
