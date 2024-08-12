@@ -8,6 +8,7 @@ import requests
 import dateutil.parser
 import m3u8
 from pydantic import BaseModel
+from slugify import slugify
 from pydantic_core import ValidationError
 from typed_argparse import TypedArgs
 import typed_argparse
@@ -52,7 +53,11 @@ def get_valid_playlist(path: str, resolution: T_RESOLUTION) -> M3U8Stream | None
     for domain in DOMAINS:
         link = f"{domain}{path}/{resolution}/index-dvr.m3u8"
         partial_link = f"{domain}{path}/{resolution}/"
-        resp = requests.get(link, timeout=5)
+        try:
+            resp = requests.get(link, timeout=5)
+        except Exception as e:
+            print(e)
+            continue
         if resp.ok:
             return M3U8Stream(
                 content=resp.text, link=link, partial_link=partial_link, path=path
@@ -70,7 +75,14 @@ def sullygnome_streams_link(streamer_id: int) -> str:
 
 def fetch_behind_cloudflare(link: str) -> str:
     for _ in range(5):
-        resp = cf_requests.get(link, impersonate="chrome", timeout=5)
+        try:
+            resp = cf_requests.request(
+                method="GET", url=link, impersonate="chrome", timeout=5
+            )
+        except Exception as e:
+            print(e)
+            sleep(5)
+            continue
         if not resp.ok:
             print(resp.status_code)
             sleep(5)
@@ -139,7 +151,7 @@ def run_program(args: Arguments) -> None:
             streamer_folder.mkdir(parents=True, exist_ok=True)
             filePath = Path(
                 streamer_folder,
-                f"{stream_data.channelurl}_{stream_data.startDateTime}_{stream_data.streamId}_index.m3u8",
+                f"{stream_data.channelurl}_{slugify(stream_data.startDateTime)}_{stream_data.streamId}.m3u8",
             ).resolve()
             filePath.write_text(new_file)
         else:
