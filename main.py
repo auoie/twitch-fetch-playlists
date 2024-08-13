@@ -209,7 +209,7 @@ def run_program(args: Arguments) -> None:
         exit(1)
     paths = get_possible_paths(streams_api_response)
     print(f"{len(paths)} streams to consider")
-    asyncio.run(get_valid_paths(20, args.resolution, paths))
+    asyncio.run(get_valid_paths(args.concurrency, args.resolution, paths))
 
 
 def main():
