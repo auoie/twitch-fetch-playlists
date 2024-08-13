@@ -88,11 +88,11 @@ def fetch_behind_cloudflare(link: str) -> str:
             )
         except Exception as e:
             print(e)
-            sleep(5)
+            sleep(1)
             continue
         if not resp.ok:
             print(resp.status_code)
-            sleep(5)
+            sleep(1)
         else:
             return resp.text
     exit(1)
